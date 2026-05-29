@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI 资讯日报</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <div class="container">
+    <!-- Left Column: Summary -->
+    <aside class="left-panel">
+      <div class="summary-section">
+        <h2>重要事件</h2>
+        <div id="highlights"></div>
+      </div>
+
+      <div class="summary-section">
+        <h2>趋势</h2>
+        <div id="trends"></div>
+      </div>
+
+      <div class="summary-section">
+        <h2>值得一试的创意</h2>
+        <div id="creative-ideas"></div>
+      </div>
+
+      <div class="summary-section">
+        <h2>风险提示</h2>
+        <div id="risks"></div>
+      </div>
+    </aside>
+
+    <!-- Middle Column: Articles -->
+    <main class="middle-panel">
+      <header class="header">
+        <h1>AI 资讯</h1>
+        <div class="filters" id="filters"></div>
+      </header>
+
+      <div class="articles-list" id="articles-list"></div>
+    </main>
+
+    <!-- Right Column: Keyword Stats -->
+    <aside class="right-panel">
+      <h2>关键词统计</h2>
+      <div id="keyword-chart"></div>
+    </aside>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

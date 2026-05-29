@@ -1,0 +1,375 @@
+# AI 资讯日报可视化 - 设计文档
+
+## 技术架构
+
+```
+前端 (HTML/JS/CSS) <--fetch--> 后端 (Node.js/Express) <--LLM API--> OpenAI/兼容API
+```
+
+### 文件结构
+
+```
+/
+├── CLAUDE.md
+├── design.md
+└── server/
+    ├── server.js          # Node.js 后端
+    ├── package.json
+    ├── data.json          # 原始文章数据（爬取入库）
+    ├── mock.json          # LLM 处理后的完整数据（含原始字段 + enriched 字段）
+    └── public/
+        ├── index.html     # 前端页面
+        ├── app.js         # 前端逻辑
+        └── styles.css     # 样式
+```
+
+## 数据现状
+
+data.json 中每篇文章结构：
+```json
+{
+  "link": "url",
+  "title": "标题",
+  "abstract": "摘要",
+  "publishTime": 毫秒时间戳,
+  "source": "来源",
+  "content": "正文"
+}
+```
+
+## 目标 Schema 设计
+
+文章以 `artical_1`, `artical_2` ... 为 key（注意：当前拼写为 artical，暂不改动）：
+
+```json
+{
+  "artical_1": {
+    // 原始字段（来自 data.json，在 LLM 处理阶段写入）
+    "link": "string",
+    "title": "string",
+    "abstract": "string",
+    "publishTime": "number (ms)",
+    "source": "string",
+
+    // LLM 处理后新增字段
+    "translated_title": "string（中文标题）",
+    "summary": "string (40-50字中文摘要)",
+    "score": "number (0-100)",
+
+    // 五维评分（悬停雷达图用）
+    "dimensions": {
+      "innovation": "number (0-100)",
+      "business_impact": "number (0-100)",
+      "timeliness": "number (0-100)",
+      "industry_coverage": "number (0-100)",
+      "reader_value": "number (0-100)"
+    },
+
+    // 关键词标签（LLM 提取的原始值，后端返回时经 keywordMap 映射清洗）
+    "keywords": {
+      "regions": ["国内" | "国外"],
+      "companies": ["公司名"],
+      "tech": ["技术词"],
+      "products": ["产品名"]
+    },
+
+    // 补充信息（不参与评分）
+    "extras": ["风险信号描述", "成本变化描述", "值得注意的点"]
+  }
+}
+```
+
+### 关键词映射表（keywordMap）
+
+存储在 mock.json 根层级，后端 `/api/articles` 返回时自动应用映射：
+
+```json
+{
+  "keywordMap": {
+    "companies": { "映射前": "映射后" },
+    "tech": { "映射前": "映射后" },
+    "products": { "映射前": "映射后" }
+  }
+}
+```
+
+## 评分维度（各20%权重）
+
+| 维度 | 字段名 | 说明 |
+|------|--------|------|
+| 技术创新性 | innovation | 是否涉及原创性突破/新架构 |
+| 商业影响力 | business_impact | 对市场格局、成本结构的影响 |
+| 时效性 | timeliness | 重磅新品 vs 常规更新 |
+| 行业覆盖广度 | industry_coverage | 影响行业的多样性 |
+| 读者价值 | reader_value | 对AI从业者的实用价值 |
+
+## 数据处理流程
+
+### LLM 调用要求
+
+- 必须有重试机制
+- 每次调用需验证 JSON 解析成功
+- 解析失败（JSON 格式错误/字段缺失）则重试
+- 最大重试次数：3次
+- 重试间隔：指数退避（1s, 2s, 4s...）
+
+### 第1步：逐篇处理 Prompt
+
+```
+你是一个AI资讯评分专家。请根据文章信息从以下维度评分，每项0-100，最终输出加权平均分（权重各20%）：
+
+1. 技术创新性：是否涉及原创性突破/新架构/新方法？
+2. 商业影响力：对市场格局、成本结构、竞争态势的影响程度？
+3. 时效性：是重磅新品发布还是常规更新？
+4. 行业覆盖广度：影响行业的多样性和深度？
+5. 读者价值：对AI开发者/从业者的实用参考价值？
+
+同时提取关键词和补充信息（没有就不写，不要硬凑）。
+
+补充信息要求每条必须包含：背景+结论+影响/启示。不要只描述现象，要让人知道"所以呢"。
+
+补充信息类型（全部面向读者，从读者角度出发，有则写，没有不用硬加）：
+- 风险信号：对读者有什么风险/威胁，读者需要警惕什么
+- 成本变化：对读者的AI使用成本有什么影响，读者需要注意什么
+- 竞争格局变化：对读者所在行业意味着什么，读者需要关注什么
+- 值得一试的创意：读者可以怎么用，从哪里入手
+
+错误示例（站在公司角度）：
+"建议Anthropic加强评估协议并定期审视模型行为模式"
+
+正确示例（面向读者）：
+"Opus 4.8可能发展出'被评估感知'，输出结果可能已不客观——读者在重要决策中应额外验证模型输出"
+
+文章信息：
+- 标题：{title}
+- 摘要：{abstract}
+- 来源：{source}
+
+输出JSON格式：
+{
+  "translated_title": "中文标题（英文标题才需要翻译）",
+  "summary": "40-50字中文摘要（即便原文已有摘要也要重新总结）",
+  "score": 最终评分0-100,
+  "dimensions": {
+    "innovation": 评分0-100,
+    "business_impact": 评分0-100,
+    "timeliness": 评分0-100,
+    "industry_coverage": 评分0-100,
+    "reader_value": 评分0-100
+  },
+  "keywords": {
+    "regions": ["国内"或"国外",无其他选项],
+    "companies": ["公司名"],
+    "tech": ["技术词"],
+    "products": ["产品名"]
+  },
+  "extras": ["补充信息1", "补充信息2"]
+}
+```
+
+每篇文章调用 LLM，输出 JSON。同时将 data.json 中的 `link`/`title`/`abstract`/`publishTime`/`source` 写入 enriched 数据。
+
+### 第2步：关键词标准化
+
+将第1步所有文章的 keywords 汇总，让 LLM 生成标准化映射表：
+
+```
+以下是从各篇文章提取的关键词，存在语义重复和不规范，请生成标准化映射：
+
+companies: {companies列表}
+tech: {tech列表}
+products: {products列表}
+
+输出JSON格式：
+{
+  "companies": {
+    "映射前": "映射后"
+  },
+  "tech": {
+    "映射前": "映射后"
+  },
+  "products": {
+    "映射前": "映射后"
+  }
+}
+
+原则：
+- 语义相同的词统一为一个
+- 格式统一（如token/Token → token）
+- tech关键词可以合并为大概念（如 KV Cache/PagedAttention/FlashAttention → 推理优化），保留3-5个核心概念即可
+- 保留原始大小写作为映射前
+```
+
+生成映射表后，将 keywordMap 写入 mock.json 根层级。**注意：不清改文章中的原始 keywords**，映射在后端 `/api/articles` 返回时动态应用。
+
+### 第3步：左侧总结
+
+将标准化后的所有文章 JSON 一次性喂给 LLM：
+
+```
+你是一个AI资讯分析师。请分析今日日报的所有文章，输出结构化简报，不需要引用具体文章标题。
+
+输出JSON格式：
+{
+  "highlights": [
+    {
+      "event": "重要事件名称",
+      "background": "关键背景（1-2句）",
+      "impact": "对行业/读者影响（1-2句）"
+    }
+  ],
+  "trends": ["趋势判断1", "趋势判断2"],
+  "creative_ideas": ["值得一试的创意1", "值得一试的创意2"],
+  "risks": ["未来风险1", "未来风险2"]
+}
+```
+
+### 完整流程图
+
+```
+data.json
+  ↓
+第1步：逐篇调用 LLM（重试3次）
+  → 输出 enriched 文章（含原始字段 + LLM 字段）
+  ↓
+汇总所有文章的 keywords
+  ↓
+第2步：调用 LLM 生成关键词映射表（keywordMap）
+  → 映射表写入 mock.json 根层级，不改文章原始 keywords
+  ↓
+第3步：调用 LLM 生成左侧总结（dailySummary）
+  ↓
+mock.json（完整数据，可直接被后端使用）
+```
+
+## API 设计
+
+### GET /api/articles
+
+返回处理后的文章列表。后端返回前自动应用 keywordMap 映射，前端拿到的 keywords 已是清洗后的值。
+
+响应示例：
+```json
+{
+  "artical_1": {
+    "link": "...",
+    "title": "...",
+    "translated_title": "...",
+    "summary": "...",
+    "score": 83,
+    "dimensions": { ... },
+    "keywords": {
+      "regions": ["国外"],
+      "companies": ["Meta", "Google"],   // 已映射
+      "tech": ["推理策略"],              // 已映射（原5个词合并为1个）
+      "products": ["AutoTTS", "Qwen3"]   // 已映射
+    },
+    "extras": [...]
+  }
+}
+```
+
+### GET /api/summary
+
+返回左侧总结内容。
+
+响应结构：
+```json
+{
+  "highlights": [{ "event": "", "background": "", "impact": "" }],
+  "trends": ["..."],
+  "creative_ideas": ["..."],
+  "risks": ["..."]
+}
+```
+
+### GET /api/keywords
+
+返回所有关键词（已清洗）及映射表，用于筛选按钮和图表。
+
+响应结构：
+```json
+{
+  "techKeywords": ["推理优化", "AI代理", ...],
+  "companies": ["Anthropic", "DeepSeek", ...],
+  "keywordMap": {
+    "companies": { ... },
+    "tech": { ... },
+    "products": { ... }
+  }
+}
+```
+
+### POST /api/analyze
+
+触发批量处理（当前为 mock 模式，直接返回 mock.json）。
+
+生产模式下将执行：
+1. 读取 data.json
+2. 第1步：逐篇调用 LLM（重试3次）
+3. 第2步：汇总 keywords，调用 LLM 生成映射表
+4. 第3步：调用 LLM 生成左侧总结
+5. 返回完整数据
+
+## 页面布局
+
+```
++------------------+------------------+------------------+
+|   左侧总结        |    AI 资讯       |   关键词统计     |
+|                  |    排行列表      |   图表           |
+|  今日简报         |    [筛选按钮]    |                  |
+|  - 简报内容       |    国内/国外     |   Top 10 关键词   |
+|                  |    公司名        |   + 次数柱状图   |
+|  值得一试的创意   |    技术词        |                  |
+|  - 创意1         |    产品名        |   公司分布       |
+|  - 创意2         |                  |   + 饼图         |
+|                  |                  |                  |
+|  未来风险         |                  |                  |
+|  - 风险1         |                  |                  |
++------------------+------------------+------------------+
+```
+
+### AI 资讯列表项结构
+
+```
++----------------------------------+
+|  [标题]（可点击跳转原文）          |
+|  [摘要小字]                      |
+|  [来源] [评分]                    |
+|  [关键词标签: 区域/公司/技术]     |
++----------------------------------+
+```
+
+悬停时显示气泡雷达图（五维评分），气泡自动做视口边界兼容（底部/右侧/左侧溢出时翻转或调整位置）。
+
+支持按关键词筛选（区域、公司、技术）。
+
+## 当前状态
+
+### 已完成
+
+- [x] 后端 server.js
+  - Mock 模式：直接读取 mock.json，不再运行时合并 data.json
+  - `/api/articles`：返回前自动应用 keywordMap 映射清洗，去重
+  - `/api/summary`：返回左侧总结
+  - `/api/keywords`：返回清洗后的关键词列表及映射表
+  - `/api/analyze`：mock 模式占位
+- [x] 前端
+  - 三栏布局（左侧总结 / 中间文章列表 / 右侧关键词统计）
+  - 文章按评分排序，支持关键词筛选
+  - 悬停雷达图气泡（五维评分），视口边界兼容
+  - 技术关键词柱状图 + 公司分布饼图（Chart.js）
+- [x] 数据处理
+  - mock.json 包含完整数据（原始字段 + enriched 字段），无需运行时合并
+  - keywordMap 在后端统一处理，前端不再重复映射
+
+### 待开发
+
+- [ ] 后端 LLM 调用
+  - 实现第1步：逐篇调用 LLM（含重试、指数退避）
+  - 实现第2步：关键词标准化映射
+  - 实现第3步：左侧总结生成
+  - `/api/analyze` 接入真实 LLM pipeline
+- [ ] 前端优化
+  - 文章卡片展开/收起 extras 补充信息
+  - 移动端适配优化
