@@ -1,100 +1,190 @@
+require('dotenv').config();
 const express = require('express');
 const path = require('path');
+const fs = require('fs');
+const { runAnalysisPipeline, cleanArticleKeywords } = require('./llm');
 
 const app = express();
 const PORT = 3000;
 
-// Middleware
 app.use(express.json());
 app.use(express.static('public'));
 
-// Load mock data
 const mockData = require('./mock.json');
+const rawData = require('./data.json');
 
-// Helper: apply keywordMap to clean keywords in an article
-function cleanArticleKeywords(article, keywordMap) {
-  if (!article.keywords) return article;
-  const clean = (list, map) => (list || []).map(kw => map[kw] || kw);
-  return {
-    ...article,
-    keywords: {
-      regions: article.keywords.regions,
-      companies: [...new Set(clean(article.keywords.companies, keywordMap.companies || {}))],
-      tech: [...new Set(clean(article.keywords.tech, keywordMap.tech || {}))],
-      products: [...new Set(clean(article.keywords.products, keywordMap.products || {}))]
-    }
-  };
+const LLM_DATA_PATH = path.join(__dirname, 'llmData.json');
+
+function loadLlmData() {
+  if (fs.existsSync(LLM_DATA_PATH)) {
+    return JSON.parse(fs.readFileSync(LLM_DATA_PATH, 'utf8'));
+  }
+  return null;
 }
 
-// GET /api/articles - Return all articles with enrichment data
-app.get('/api/articles', (req, res) => {
-  const articles = mockData.articals;
-  const keywordMap = mockData.keywordMap || {};
+function getMockParam(req) {
+  return req.body.mock === true || req.body.mock === 'true';
+}
 
-  const result = {};
-  Object.keys(articles).forEach(key => {
-    result[key] = cleanArticleKeywords(articles[key], keywordMap);
-  });
-
-  res.json(result);
-});
-
-// GET /api/summary - Return left side summary
-app.get('/api/summary', (req, res) => {
-  res.json(mockData.dailySummary);
-});
-
-// GET /api/keywords - Return all keywords for filtering (cleaned via keywordMap)
-app.get('/api/keywords', (req, res) => {
-  const articles = mockData.articals;
-  const keywordsMap = mockData.keywordMap || {};
-
-  // Aggregate and clean keywords using keywordMap
-  const cleanKeyword = (kw, map) => map[kw] || kw;
-
-  const companies = new Set();
-  const tech = new Set();
-  const products = new Set();
-
-  Object.values(articles).forEach(article => {
-    if (article.keywords) {
-      article.keywords.companies?.forEach(c => companies.add(cleanKeyword(c, keywordsMap.companies || {})));
-      article.keywords.tech?.forEach(t => tech.add(cleanKeyword(t, keywordsMap.tech || {})));
-      article.keywords.products?.forEach(p => products.add(cleanKeyword(p, keywordsMap.products || {})));
+function getArticlesFromData(data, isArray = false) {
+  if (isArray) {
+    const articles = {};
+    data.forEach((article, index) => {
+      articles[`artical_${index + 1}`] = article;
+    });
+    return articles;
+  }
+  const articles = {};
+  for (const key of Object.keys(data)) {
+    if (key.startsWith('artical_')) {
+      articles[key] = data[key];
     }
-  });
+  }
+  return articles;
+}
 
-  // For bar chart: use tech keywords (already cleaned)
-  // For pie chart: use companies (already cleaned)
-  res.json({
-    techKeywords: Array.from(tech).sort(),
-    companies: Array.from(companies).sort(),
-    keywordMap: {
-      companies: keywordsMap.companies || {},
-      tech: keywordsMap.tech || {},
-      products: keywordsMap.products || {}
-    }
-  });
+app.post('/api/articles', (req, res) => {
+  const useMock = getMockParam(req);
+  console.log('[Server] /api/articles called, useMock:', useMock);
+
+  if (useMock) {
+    const mockArticles = mockData.articals || mockData;
+    const articles = getArticlesFromData(mockArticles);
+    const keywordMap = mockData.keywordMap || {};
+    const result = {};
+    Object.keys(articles).forEach(key => {
+      result[key] = cleanArticleKeywords(articles[key], keywordMap);
+    });
+    return res.json(result);
+  }
+
+  const llmData = loadLlmData();
+  if (llmData) {
+    const articles = getArticlesFromData(llmData);
+    const keywordMap = llmData.keywordMap || {};
+    const result = {};
+    Object.keys(articles).forEach(key => {
+      result[key] = cleanArticleKeywords(articles[key], keywordMap);
+    });
+    return res.json(result);
+  }
+
+  const articles = getArticlesFromData(rawData, true);
+  res.json(articles);
 });
 
-// POST /api/analyze - Trigger batch processing (mock for now)
-// In production, this would:
-// 1. Read data.json
-// 2. Step 1: Call LLM for each article (with retry)
-// 3. Step 2: Aggregate keywords, call LLM for mapping
-// 4. Step 3: Call LLM for summary
-// For now, just return the existing mock data
-app.post('/api/analyze', (req, res) => {
-  // In mock mode, just return success
-  // In production, this would trigger the full pipeline
-  res.json({
-    success: true,
-    message: 'Analysis complete (mock mode)',
-    data: mockData
-  });
+app.post('/api/summary', (req, res) => {
+  const useMock = getMockParam(req);
+  console.log('[Server] /api/summary called, useMock:', useMock);
+
+  if (useMock) {
+    return res.json(mockData.dailySummary || { highlights: [], trends: [], creative_ideas: [], risks: [] });
+  }
+
+  const llmData = loadLlmData();
+  if (llmData && llmData.dailySummary) {
+    return res.json(llmData.dailySummary);
+  }
+
+  res.json({ highlights: [], trends: [], creative_ideas: [], risks: [] });
 });
 
-// Start server
+app.post('/api/keywords', (req, res) => {
+  const useMock = getMockParam(req);
+  console.log('[Server] /api/keywords called, useMock:', useMock);
+
+  if (useMock) {
+    const mockArticles = mockData.articals || mockData;
+    const articles = getArticlesFromData(mockArticles);
+    const keywordsMap = mockData.keywordMap || {};
+    const cleanKeyword = (kw, map) => map[kw] || kw;
+    const companies = new Set();
+    const tech = new Set();
+    const products = new Set();
+
+    Object.values(articles).forEach(article => {
+      if (article.keywords) {
+        article.keywords.companies?.forEach(c => companies.add(cleanKeyword(c, keywordsMap.companies || {})));
+        article.keywords.tech?.forEach(t => tech.add(cleanKeyword(t, keywordsMap.tech || {})));
+        article.keywords.products?.forEach(p => products.add(cleanKeyword(p, keywordsMap.products || {})));
+      }
+    });
+
+    return res.json({
+      techKeywords: Array.from(tech).sort(),
+      companies: Array.from(companies).sort(),
+      keywordMap: {
+        companies: keywordsMap.companies || {},
+        tech: keywordsMap.tech || {},
+        products: keywordsMap.products || {}
+      }
+    });
+  }
+
+  const llmData = loadLlmData();
+  if (llmData) {
+    const articles = getArticlesFromData(llmData);
+    const keywordsMap = llmData.keywordMap || {};
+    const cleanKeyword = (kw, map) => map[kw] || kw;
+    const companies = new Set();
+    const tech = new Set();
+    const products = new Set();
+
+    Object.values(articles).forEach(article => {
+      if (article.keywords) {
+        article.keywords.companies?.forEach(c => companies.add(cleanKeyword(c, keywordsMap.companies || {})));
+        article.keywords.tech?.forEach(t => tech.add(cleanKeyword(t, keywordsMap.tech || {})));
+        article.keywords.products?.forEach(p => products.add(cleanKeyword(p, keywordsMap.products || {})));
+      }
+    });
+
+    return res.json({
+      techKeywords: Array.from(tech).sort(),
+      companies: Array.from(companies).sort(),
+      keywordMap: {
+        companies: keywordsMap.companies || {},
+        tech: keywordsMap.tech || {},
+        products: keywordsMap.products || {}
+      }
+    });
+  }
+
+  res.json({ techKeywords: [], companies: [], keywordMap: { companies: {}, tech: {}, products: {} } });
+});
+
+app.get('/api/analyze', async (req, res) => {
+  const useMock = req.query.mock === 'true';
+  console.log('[Server] /api/analyze called, useMock:', useMock);
+
+  if (useMock) {
+    return res.json({
+      success: true,
+      message: 'Analysis complete (mock mode)',
+      data: mockData
+    });
+  }
+
+  console.log('[Server] Starting SSE stream for analysis...');
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  const sendProgress = (step, current, total, message) => {
+    res.write(`data: ${JSON.stringify({ step, current, total, message })}\n\n`);
+  };
+
+  try {
+    const data = await runAnalysisPipeline(sendProgress);
+    res.write(`data: ${JSON.stringify({ step: 'complete', current: 100, total: 100, message: '处理完成', data })}\n\n`);
+    res.end();
+  } catch (err) {
+    console.error(err);
+    res.write(`data: ${JSON.stringify({ step: 'error', message: '处理失败: ' + err.message })}\n\n`);
+    res.end();
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`Server running at http://localhost:${PORT}`);
   console.log('Mock mode: using mock.json for all data');

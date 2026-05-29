@@ -5,6 +5,7 @@ let techKeywords = [];
 let companies = [];
 let keywordMap = {};
 let activeFilters = { regions: null, companies: null, tech: null, products: null };
+let mockMode = localStorage.getItem('mockMode') !== 'false';
 
 // DOM Elements
 const articlesListEl = document.getElementById('articles-list');
@@ -14,9 +15,38 @@ const trendsEl = document.getElementById('trends');
 const creativeIdeasEl = document.getElementById('creative-ideas');
 const risksEl = document.getElementById('risks');
 const keywordChartEl = document.getElementById('keyword-chart');
+const mockModeToggle = document.getElementById('mock-mode-toggle');
+const analyzeBtn = document.getElementById('analyze-btn');
+const loadingOverlay = document.getElementById('loading-overlay');
+const loadingMessage = document.getElementById('loading-message');
+const progressBar = document.getElementById('progress-bar');
 
 // Initialize
 async function init() {
+  console.log('[App] Init, mockMode from localStorage:', localStorage.getItem('mockMode'));
+  mockModeToggle.checked = mockMode;
+
+  mockModeToggle.addEventListener('change', async (e) => {
+    mockMode = e.target.checked;
+    localStorage.setItem('mockMode', mockMode);
+    console.log('[App] Toggle changed, mockMode:', mockMode);
+    await Promise.all([
+      fetchArticles(),
+      fetchSummary(),
+      fetchKeywords()
+    ]);
+    renderAll();
+  });
+
+  analyzeBtn.addEventListener('click', async () => {
+    analyzeBtn.disabled = true;
+    try {
+      await runAnalysis();
+    } finally {
+      analyzeBtn.disabled = false;
+    }
+  });
+
   await Promise.all([
     fetchArticles(),
     fetchSummary(),
@@ -25,10 +55,82 @@ async function init() {
   renderAll();
 }
 
+function showLoading(message = '处理中...') {
+  loadingOverlay.style.display = 'flex';
+  loadingMessage.textContent = message;
+  progressBar.style.width = '0%';
+}
+
+function updateLoading(message, percent) {
+  loadingMessage.textContent = message;
+  if (percent !== undefined) {
+    progressBar.style.width = percent + '%';
+  }
+}
+
+function hideLoading() {
+  loadingOverlay.style.display = 'none';
+}
+
+async function runAnalysis() {
+  showLoading('开始分析...');
+  console.log('[App] runAnalysis started, connecting to EventSource...');
+
+  return new Promise((resolve, reject) => {
+    const eventSource = new EventSource('/api/analyze');
+    console.log('[App] EventSource connected');
+
+    eventSource.onmessage = async (event) => {
+      const data = JSON.parse(event.data);
+      console.log('[App] SSE message:', data);
+
+      if (data.step === 'start') {
+        updateLoading('处理文章...', 0);
+      } else if (data.step === 'step1') {
+        const percent = Math.round((data.current / data.total) * 60);
+        updateLoading(data.message, percent);
+      } else if (data.step === 'step2') {
+        updateLoading(data.message, 70);
+      } else if (data.step === 'step3') {
+        updateLoading(data.message, 85);
+      } else if (data.step === 'complete') {
+        updateLoading('处理完成!', 100);
+        eventSource.close();
+        setTimeout(async () => {
+          hideLoading();
+          await Promise.all([
+            fetchArticles(),
+            fetchSummary(),
+            fetchKeywords()
+          ]);
+          renderAll();
+          resolve();
+        }, 500);
+      } else if (data.step === 'error') {
+        eventSource.close();
+        hideLoading();
+        alert('分析失败: ' + data.message);
+        reject(new Error(data.message));
+      }
+    };
+
+    eventSource.onerror = (err) => {
+      console.error('[App] EventSource error:', err);
+      eventSource.close();
+      hideLoading();
+      reject(err);
+    };
+  });
+}
+
 // API Calls
 async function fetchArticles() {
   try {
-    const res = await fetch('/api/articles');
+    const res = await fetch('/api/articles', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mock: mockMode })
+    });
     articles = await res.json();
   } catch (err) {
     console.error('Failed to fetch articles:', err);
@@ -37,7 +139,11 @@ async function fetchArticles() {
 
 async function fetchSummary() {
   try {
-    const res = await fetch('/api/summary');
+    const res = await fetch('/api/summary', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mock: mockMode })
+    });
     summary = await res.json();
   } catch (err) {
     console.error('Failed to fetch summary:', err);
@@ -46,7 +152,11 @@ async function fetchSummary() {
 
 async function fetchKeywords() {
   try {
-    const res = await fetch('/api/keywords');
+    const res = await fetch('/api/keywords', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mock: mockMode })
+    });
     const data = await res.json();
     techKeywords = data.techKeywords;
     companies = data.companies;
@@ -228,6 +338,12 @@ function renderKeywordChart() {
     </div>
   `;
 
+  // Destroy existing pie chart if exists
+  if (pieChart) {
+    pieChart.destroy();
+    pieChart = null;
+  }
+
   // Draw pie chart for companies
   const companyCounts = {};
   Object.values(articles).forEach(article => {
@@ -303,7 +419,7 @@ function showRadarTooltip(e, articleKey) {
   const data = [
     article.dimensions.innovation,
     article.dimensions.business_impact,
-    article.dimensions.timeliness,
+    article.dimensions.quality,
     article.dimensions.industry_coverage,
     article.dimensions.reader_value
   ];
@@ -316,7 +432,7 @@ function showRadarTooltip(e, articleKey) {
     radarChart = new Chart(ctx, {
       type: 'radar',
       data: {
-        labels: ['技术创新性', '商业影响力', '时效性', '行业覆盖', '读者价值'],
+        labels: ['技术创新性', '商业影响力', '文章/项目质量', '行业覆盖', '读者价值'],
         datasets: [{
           data: data,
           backgroundColor: 'rgba(0, 122, 255, 0.2)',
